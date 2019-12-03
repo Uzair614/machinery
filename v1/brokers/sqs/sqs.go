@@ -37,6 +37,11 @@ type Broker struct {
 	service           sqsiface.SQSAPI
 }
 
+type sqsReceivedMessages struct {
+	delivery *awssqs.ReceiveMessageOutput
+	queue    *string
+}
+
 // New creates new Broker instance
 func New(cnf *config.Config) iface.Broker {
 	b := &Broker{Broker: common.NewBroker(cnf)}
@@ -64,7 +69,7 @@ func (b *Broker) GetPendingTasks(queue string) ([]*tasks.Signature, error) {
 // StartConsuming enters a loop and waits for incoming messages
 func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcessor iface.TaskProcessor) (bool, error) {
 	b.Broker.StartConsuming(consumerTag, concurrency, taskProcessor)
-	deliveries := make(chan *awssqs.ReceiveMessageOutput, concurrency)
+	deliveries := make(chan *sqsReceivedMessages, concurrency)
 	pool := make(chan struct{}, concurrency)
 
 	// initialize worker pool with maxWorkers workers
@@ -88,7 +93,7 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 				qURL := b.getQueueURL(taskProcessor)
 				output, err := b.receiveMessage(qURL)
 				if err == nil && len(output.Messages) > 0 {
-					deliveries <- output
+					deliveries <- &sqsReceivedMessages{delivery: output, queue:qURL}
 
 				} else {
 					//return back to pool right away
@@ -178,7 +183,7 @@ func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error 
 }
 
 // consume is a method which keeps consuming deliveries from a channel, until there is an error or a stop signal
-func (b *Broker) consume(deliveries <-chan *awssqs.ReceiveMessageOutput, concurrency int, taskProcessor iface.TaskProcessor, pool chan struct{}) error {
+func (b *Broker) consume(deliveries <-chan *sqsReceivedMessages, concurrency int, taskProcessor iface.TaskProcessor, pool chan struct{}) error {
 
 	errorsChan := make(chan error)
 
@@ -194,7 +199,8 @@ func (b *Broker) consume(deliveries <-chan *awssqs.ReceiveMessageOutput, concurr
 }
 
 // consumeOne is a method consumes a delivery. If a delivery was consumed successfully, it will be deleted from AWS SQS
-func (b *Broker) consumeOne(delivery *awssqs.ReceiveMessageOutput, taskProcessor iface.TaskProcessor) error {
+func (b *Broker) consumeOne(sqsRecievedMsgs *sqsReceivedMessages, taskProcessor iface.TaskProcessor) error {
+	delivery := sqsRecievedMsgs.delivery
 	if len(delivery.Messages) == 0 {
 		log.ERROR.Printf("received an empty message, the delivery was %v", delivery)
 		return errors.New("received empty message, the delivery is " + delivery.GoString())
@@ -215,7 +221,7 @@ func (b *Broker) consumeOne(delivery *awssqs.ReceiveMessageOutput, taskProcessor
 	// and leave the message in the queue
 	if !b.IsTaskRegistered(sig.Name) {
 		if sig.IgnoreWhenTaskNotRegistered {
-			b.deleteOne(delivery, sig)
+			b.deleteOne(sqsRecievedMsgs)
 		}
 		return fmt.Errorf("task %s is not registered", sig.Name)
 	}
@@ -229,22 +235,19 @@ func (b *Broker) consumeOne(delivery *awssqs.ReceiveMessageOutput, taskProcessor
 		return err
 	}
 	// Delete message after successfully consuming and processing the message
-	if err = b.deleteOne(delivery, sig); err != nil {
+	if err = b.deleteOne(sqsRecievedMsgs); err != nil {
 		log.ERROR.Printf("error when deleting the delivery. delivery is %v, Error=%s", delivery, err)
 	}
 	return err
 }
 
 // deleteOne is a method delete a delivery from AWS SQS
-func (b *Broker) deleteOne(delivery *awssqs.ReceiveMessageOutput, sig *tasks.Signature) error {
-	qURL := b.defaultQueueURL()
-	if sig.RoutingKey != "" {
-		qURL = b.queueToURL(sig.RoutingKey)
-	}
+func (b *Broker) deleteOne(delivery *sqsReceivedMessages) error {
+	qURL := delivery.queue
 
 	_, err := b.service.DeleteMessage(&awssqs.DeleteMessageInput{
 		QueueUrl:      qURL,
-		ReceiptHandle: delivery.Messages[0].ReceiptHandle,
+		ReceiptHandle: delivery.delivery.Messages[0].ReceiptHandle,
 	})
 
 	if err != nil {
@@ -297,7 +300,7 @@ func (b *Broker) initializePool(pool chan struct{}, concurrency int) {
 }
 
 // consumeDeliveries is a method consuming deliveries from deliveries channel
-func (b *Broker) consumeDeliveries(deliveries <-chan *awssqs.ReceiveMessageOutput, concurrency int, taskProcessor iface.TaskProcessor, pool chan struct{}, errorsChan chan error) (bool, error) {
+func (b *Broker) consumeDeliveries(deliveries <-chan *sqsReceivedMessages, concurrency int, taskProcessor iface.TaskProcessor, pool chan struct{}, errorsChan chan error) (bool, error) {
 	select {
 	case err := <-errorsChan:
 		return false, err
