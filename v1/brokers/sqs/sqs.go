@@ -215,7 +215,7 @@ func (b *Broker) consumeOne(sqsReceivedMsgs *ReceivedMessages, taskProcessor ifa
 	if err := decoder.Decode(sig); err != nil {
 		log.ERROR.Printf("unmarshal error. the delivery is %v", delivery)
 		// if the unmarshal fails, remove the delivery from the queue
-		if delErr := b.deleteOne(delivery); delErr != nil {
+		if delErr := b.deleteOne(sqsReceivedMsgs); delErr != nil {
 			log.ERROR.Printf("error when deleting the delivery. delivery is %v, Error=%s", delivery, delErr)
 		}
 		return err
