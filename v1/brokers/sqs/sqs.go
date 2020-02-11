@@ -233,6 +233,11 @@ func (b *Broker) consumeOne(sqsReceivedMsgs *ReceivedMessages, taskProcessor ifa
 		return fmt.Errorf("task %s is not registered", sig.Name)
 	}
 
+	if sqsReceivedMsgs.queue != nil {
+		queueName := b.urlToQueue(*(sqsReceivedMsgs.queue))
+		sig.RoutingKey = *queueName
+	}
+
 	err := taskProcessor.Process(sig)
 	if err != nil {
 		// stop task deletion in case we want to send messages to dlq in sqs
@@ -373,4 +378,10 @@ func (b *Broker) getQueueURL(taskProcessor iface.TaskProcessor) *string {
 
 func (b *Broker) queueToURL(queue string) *string {
 	return aws.String(b.GetConfig().Broker + "/" + queue)
+}
+
+func (b *Broker) urlToQueue(queue string) *string {
+	parts := strings.Split(queue, "/")
+	queueName := parts[len(parts) - 1]
+	return &queueName
 }
